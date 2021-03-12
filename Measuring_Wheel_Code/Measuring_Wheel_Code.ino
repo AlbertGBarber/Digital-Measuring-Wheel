@@ -19,16 +19,21 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 //THE SOFTWARE.
 
-// Encoder.h must be installed as a library, or else the .cpp/.h files
-// for both classes must be in the include path of your project
+//required libraries; find them using the Arduino library manager
 #include <Encoder.h>
 #include <Wire.h>
 #include <Adafruit_SSD1306.h>
 #include <VoltageReference.h>
 
 //=================================================================
-#define DISPLAY_ADDR 0x3C //I2C address for the SSD1306 display
+// ===                   IMPORTANT VARS                         ===
 //=================================================================
+
+#define DISPLAY_ADDR         0x3C //I2C address for the SSD1306 display
+
+#define WHEEL_DIAM           8.95 //Measuring wheel diameter in cm
+
+#define DEFAULT_UNITS_INCHES false //sets default units to either cm or inches
 
 // ================================================================
 // ===                         MODES                            ===
@@ -37,8 +42,8 @@
 //you can remove modes by setting the mode number to greater than the NUM_MODES ex: 999
 //if you do this don't forget to decrease NUM_MODES to match the number of modes remaining
 //and also change the order of the remaining modes (going from 0 to however remain)
-#define MEASURING_WHEEL  0  
-#define TACHOMETER       1  
+#define MEASURING_WHEEL  0
+#define TACHOMETER       1
 
 uint8_t NUM_MODES =      2; //total number of active modes
 
@@ -51,13 +56,13 @@ volatile uint8_t mode =  0; //inital mode
 #define ENCODER_PIN_1     2
 #define ENCODER_PIN_2     3
 
-#define MODE_BUTTON_PIN   4
-#define ZERO_BUTTON_PIN   5
+#define MODE_BUTTON_PIN   5
+#define ZERO_BUTTON_PIN   4
 
 // ================================================================
 // ===                     BAT SENSE SETUP                      ===
 // ================================================================
-//our range for lipo voltage is 4.2-3.4V, 
+//our range for lipo voltage is 4.2-3.4V,
 //after 3.4 the LiPo is 95% empty, so we should recharge
 const unsigned long batteryUpdateTime = 5000; //how often we update the battery level in ms
 unsigned long prevBatReadTime = 0; //the last time we read the battery in ms
@@ -92,9 +97,24 @@ unsigned long lastZeroPress = millis();
 const float cmToIn = 0.393701; //conversion from cm to in
 const int32_t usInMin = 60 * 1000000; //amount of microseconds in a min
 
-//default units for length
-String units = "cm";
-boolean unitSwitch = false;
+//units for length and flag for changing them
+String units;
+boolean unitSwitch;
+
+// ================================================================
+// ===             ENCODER / GEAR RATIO SETUP                   ===
+// ================================================================
+
+//both work as interrupts so we should get good performance
+Encoder myEnc(ENCODER_PIN_1, ENCODER_PIN_2);
+
+#define WHEEL_DIAM_IN         WHEEL_DIAM * cmToIn //wheel diameter in inches
+#define GEAR_RATIO            48/8 //number of outer gear teeth / number of inner gear teeth
+#define ENC_STEPS_PER_REV     48 //number of encoder steps per revolution
+//conversion from one revolution to linear distance traveled in cm
+#define REV_TO_LIN_DIST_CM    M_PI * WHEEL_DIAM
+//distance covered per encoder step in cm
+#define ENC_STEP_LENGTH       REV_TO_LIN_DIST_CM / (ENC_STEPS_PER_REV * GEAR_RATIO)
 
 // ================================================================
 // ===                   TACHOMETER SETUP                       ===
@@ -102,26 +122,13 @@ boolean unitSwitch = false;
 
 boolean tachOn = false; //if a tachometer mode is active
 boolean tactReadingStarted = false; //if we're reading from rpm
-volatile long irTacRevs = 0; //number of IR Tachometer revolutions (encoder revs are measured using the encoder's vars)
-unsigned long rpm;
+double rpm, linSpeed;
 unsigned long tacStartTime = 0; //start time of tachometer reading
 boolean tachStartTimeSet = false;  //starting time is only set once the tach detects motion, flag for it that has happened
 const unsigned long measureIntervalMaxSec = 10; //maxium measurement period in seconds
 const unsigned long measureIntervalMax = measureIntervalMaxSec * 1000000; //maxium measurement period in us //10 sec
 const String measureIntervalMaxString = String(measureIntervalMaxSec); //maxium measurement period as a string in sec
 
-// ================================================================
-// ===                      ENCODER SETUP                       ===
-// ================================================================
-
-//both work as interrupts so we should get good performance
-Encoder myEnc(ENCODER_PIN_1, ENCODER_PIN_2);
-
-#define WHEEL_DIAM 2.5 //encoder wheel diameter in cm
-#define GEAR_RATIO 56/8 //number of outer gear teeth / number of inner gear teeth
-#define ENC_STEPS_PER_REV 48 //number of encoder steps per revolution
-//distance covered per encoder step in cm
-const float encStepLength = (M_PI * WHEEL_DIAM ) / (ENC_STEPS_PER_REV * GEAR_RATIO);
 
 // ================================================================
 // ================================================================
@@ -134,6 +141,17 @@ const float encStepLength = (M_PI * WHEEL_DIAM ) / (ENC_STEPS_PER_REV * GEAR_RAT
 void setup() {
   //Serial.begin(115200);
   
+  // ================================================================
+  // ===                    UNITS CONFIG                          ===
+  // ================================================================
+  if(DEFAULT_UNITS_INCHES){
+    units = "in";
+    unitSwitch = true;
+  } else{
+    units = "cm";
+    unitSwitch = false;
+  }
+
   // ================================================================
   // ===                  DISPLAY CONFIG                          ===
   // ================================================================
@@ -163,14 +181,12 @@ void setup() {
   pinMode(ZERO_BUTTON_PIN, INPUT);
 
   //=================================================================
-  //  //start up splash screen
+  //start up splash screen
   display.clearDisplay();
   drawHeader("By AGB");
-  display.setCursor(28, 16);
-  display.setTextSize(2);
-  centerString("Digital", 16, 2);
-  display.setCursor(35, 33);
-  centerString("Measuring Wheel", 33, 2);
+  centerString("Measuring", 16, 2);
+  centerString("Wheel", 35, 2);
+  centerString("gitub:AlbertGBarber", 55, 1);
   display.display();
   delay(3000);
 }
@@ -202,50 +218,24 @@ void loop() {
   //displays the distance covered by the wheel and encoder (ie a ruler)
   //we always show a positive distance (although the reading can increment and decerement)
   while (mode == MEASURING_WHEEL) {
-    yield();
-    display.clearDisplay();
-    drawHeader("Measuring Wheel");
-
-    long newPosition = myEnc.read();
-    //we always show a positive distance
-    //the user can zero it if needed
-    double displayPos = abs(newPosition) * encStepLength;
-    //zeros the encoder count
-    if (!zeroButtonRun) {
-      myEnc.write(0);
-      zeroButtonRun = true;
-    }
-    display.setTextSize(3);
-    display.setCursor(10, 20);
-    if (unitSwitch) {
-      displayPos = displayPos * cmToIn;  //convert from cm to in
-      units = "in";
-    } else {
-      units = "cm";
-    }
-    centerString( doubleToString((double)displayPos, 2), 20, 3);
-    display.setCursor(46, 43);
-    display.print(units);
-    display.display();
-    readButtons();
+    runMeasuringWheel();
   }
-  
-  //a tachometer that uses the encoder wheel to measure rpm
+
+  //a tachometer to measure rpm and linear speed
   while (mode == TACHOMETER) {
     runTachometer();
   }
 
 }
 
-//resets button variables and turns off/resets all sensors
-//sets a clean state for the next mode and tries to save some power by turning off unused sensors
+//resets button variables and encoder position
+//sets a clean state for the next mode
 void resetSystemState() {
   display.clearDisplay();
   zeroButtonToggle = false;
   zeroButtonRun = true;
   myEnc.write(0);
 }
-
 
 //read the mode and zero buttons
 //if the buttons have been pressed set flags
@@ -256,7 +246,7 @@ void resetSystemState() {
 void readButtons(void) {
 
   currentTime = millis();
-  
+
   //if the mode pin is low (pressed) and it was not previously low (ie it's not being held down)
   //advance the mode counter
   //otherwise, the button is not pushed, set the previous state to high (not pressed)
@@ -264,10 +254,11 @@ void readButtons(void) {
     previousModeButtonState = LOW; //set the previous state to low while the button is being held
     //if the mode pin is high, we need change units if in measuring wheel mode
     //or switch out of tachometer mode if we're in it
-    if(mode == MEASURING_WHEEL){
+    if (mode == MEASURING_WHEEL) {
       unitSwitch = !unitSwitch;
     } else {
       resetSystemState();
+      tachOn = false;
       mode = (mode + 1) % NUM_MODES;
     }
   } else if ( digitalRead(MODE_BUTTON_PIN) == HIGH) {
@@ -293,16 +284,60 @@ void readButtons(void) {
   }
 }
 
+//displays the distance covered by the wheel and encoder (ie a ruler)
+//we always show a positive distance (although the reading can increment and decerement)
+void runMeasuringWheel() {
+  yield();
+  display.clearDisplay();
+  drawHeader("Measuring Wheel");
+
+  long newPosition = myEnc.read();
+  //we always show a positive distance
+  //the user can zero it if needed
+  //the position calculated by multiplying the steps by the linear distance covered by one encoder step
+  double displayPos = abs(newPosition) * ENC_STEP_LENGTH;
+  //zeros the encoder count
+  if (!zeroButtonRun) {
+    myEnc.write(0);
+    zeroButtonRun = true;
+  }
+  display.setTextSize(3);
+  if (unitSwitch) {
+    displayPos = displayPos * cmToIn;  //convert from cm to in
+    units = "in";
+  } else {
+    units = "cm";
+  }
+  //write out current reading and units
+  centerString( doubleToString((double)displayPos, 2), 16, 3);
+  display.setCursor(48, 35);
+  display.print(units);
+  display.setCursor(0, 57);
+  display.setTextSize(1);
+  display.print("Wheel Radius: ");
+  if (unitSwitch) {
+    display.print(WHEEL_DIAM_IN / 2);
+  } else {
+    display.print(WHEEL_DIAM / 2);
+  }
+  display.print(units);
+  display.display();
+  readButtons();
+}
+
 //code for running the tachometer
 //accessed by double pressing the zero button
+//exited by hitting the mode button
 //esentially the code will wait for the user to hit zero and then start recording revolutions
 //when the user hits zero again or when measureIntervalMax time has passed, we stop reading,
 //divide the revolutions by the time passed and convert to minutes
+//reports linear speed in in/s or cm/s depending on the default units
 void runTachometer() {
   yield();
   //if the tachometer isn't on we're on the first pass through the function
   //so we display a prompt for the user to start the first reading
   if (!tachOn) {
+    tachOn = true;
     tactReadingStarted = false;
     display.clearDisplay();
     drawHeader("Tachometer");
@@ -310,6 +345,11 @@ void runTachometer() {
     display.setCursor(15, 20);
     display.print("Hit Zero to start");
     display.display();
+    if(DEFAULT_UNITS_INCHES){
+      units = "in";
+    } else {
+      units = "cm";
+    }
   }
 
   //if the zero button is pressed and we havn't started reading we start a new reading
@@ -363,25 +403,36 @@ void runTachometer() {
     long newPosition = myEnc.read();
     //convert total revs to rpm
     rpm = ( ( abs(newPosition) / ENC_STEPS_PER_REV ) / (double)elapsedTime) * usInMin;
+    //convert RPM to linear speed
+    linSpeed = rpm / 60 * REV_TO_LIN_DIST_CM;
     display.clearDisplay();
     drawHeader("Tachometer");
-    display.setTextSize(2);
+    display.setTextSize(1);
     display.setCursor(10, 20);
-    centerString( doubleToString( (double)rpm, 0 ), 20, 2);
-    //display.print(rpm);
-    display.setCursor(46, 40);
-    display.print("RPM");
+    //centerString( doubleToString( (double)rpm, 0 ), 20, 2);
+    //display.setCursor(46, 40);
+    //display.print("RPM:");
+    display.setCursor(0, 16);
+    display.print("RPM: ");
+    display.print(doubleToString( (double)rpm, 0 ));
+    display.setCursor(0, 28);
+    display.print("Linear Spd:");
+    if(DEFAULT_UNITS_INCHES){
+      linSpeed = linSpeed * cmToIn;
+    }
+    display.print(doubleToString( (double)linSpeed, 1 ));
+    display.print(units);
+    display.print("/s");
+    display.setCursor(0, 40);
+    display.print("Wheel Dia.: ");
+    display.print(WHEEL_DIAM);
+    display.print(units);
     display.setTextSize(1);
     display.setCursor(6, 55);
     display.print("Hit Zero to restart");
     display.display();
   }
   readButtons();
-}
-
-//ir tach interrupt counting routine
-void countIRTactPulse() {
-  irTacRevs++;
 }
 
 //copied from Roberto Lo Giacco Battery Sense library
