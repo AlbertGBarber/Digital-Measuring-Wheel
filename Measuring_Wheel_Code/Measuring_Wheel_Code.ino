@@ -1,5 +1,5 @@
 //This code is placed under the MIT license
-//Copyright (c) 2021 Albert Barber
+//Copyright (c) 2022 Albert Barber
 //
 //Permission is hereby granted, free of charge, to any person obtaining a copy
 //of this software and associated documentation files (the "Software"), to deal
@@ -35,6 +35,8 @@
 
 #define DEFAULT_UNITS_INCHES false //sets default units to either cm or inches
 
+#define INCH_FRACT 16 //sets the fraction of an inch that the extra inch display will be rounded to
+
 // ================================================================
 // ===                         MODES                            ===
 // ================================================================
@@ -43,9 +45,10 @@
 //if you do this don't forget to decrease NUM_MODES to match the number of modes remaining
 //and also change the order of the remaining modes (going from 0 to however remain)
 #define MEASURING_WHEEL  0
-#define TACHOMETER       1
+#define DIAM_MEASURE     1
+#define TACHOMETER       2
 
-uint8_t NUM_MODES =      2; //total number of active modes
+uint8_t NUM_MODES =      3; //total number of active modes
 
 volatile uint8_t mode =  0; //inital mode
 // ================================================================
@@ -60,20 +63,6 @@ volatile uint8_t mode =  0; //inital mode
 #define ZERO_BUTTON_PIN   4
 
 // ================================================================
-// ===                     BAT SENSE SETUP                      ===
-// ================================================================
-//our range for lipo voltage is 4.2-3.4V,
-//after 3.4 the LiPo is 95% empty, so we should recharge
-const unsigned long batteryUpdateTime = 5000; //how often we update the battery level in ms
-unsigned long prevBatReadTime = 0; //the last time we read the battery in ms
-uint8_t batteryLvl; //the battery percentage
-#define MAX_BAT_VOLTAGE 4200 //max battery voltage
-#define MIN_BAT_VOLTAGE 3400 //min battery voltage
-
-//initialize the voltage reference library to read the Arduino's internal reference voltage
-VoltageReference vRef;
-
-// ================================================================
 // ===                     SCREEN SETUP                         ===
 // ================================================================
 #define SCREEN_WIDTH      128
@@ -83,23 +72,6 @@ VoltageReference vRef;
 // Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
 #define OLED_RESET     -1// Reset pin # (or -1 if sharing Arduino reset pin)
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-
-// ================================================================
-// ===                  PROGRAM GLOBAL VARS                     ===
-// ================================================================
-boolean zeroButtonToggle = false;
-boolean zeroButtonRun = true;
-boolean previousZeroButtonState = HIGH;
-boolean previousModeButtonState = HIGH;
-unsigned long currentTime = millis();
-unsigned long lastZeroPress = millis();
-
-const float cmToIn = 0.393701; //conversion from cm to in
-const int32_t usInMin = 60 * 1000000; //amount of microseconds in a min
-
-//units for length and flag for changing them
-String units;
-boolean unitSwitch;
 
 // ================================================================
 // ===             ENCODER / GEAR RATIO SETUP                   ===
@@ -117,6 +89,42 @@ Encoder myEnc(ENCODER_PIN_1, ENCODER_PIN_2);
 #define ENC_STEP_LENGTH       REV_TO_LIN_DIST_CM / (ENC_STEPS_PER_REV * GEAR_RATIO)
 
 // ================================================================
+// ===                     BAT SENSE SETUP                      ===
+// ================================================================
+//our range for lipo voltage is 4.2-3.4V,
+//after 3.4 the LiPo is 95% empty, so we should recharge
+const unsigned long batteryUpdateTime = 5000; //how often we update the battery level in ms
+unsigned long prevBatReadTime = 0; //the last time we read the battery in ms
+uint8_t batteryLvl; //the battery percentage
+#define MAX_BAT_VOLTAGE 4200 //max battery voltage
+#define MIN_BAT_VOLTAGE 3400 //min battery voltage
+
+//initialize the voltage reference library to read the Arduino's internal reference voltage
+VoltageReference vRef;
+
+// ================================================================
+// ===                  PROGRAM GLOBAL VARS                     ===
+// ================================================================
+boolean zeroButtonToggle = false;
+boolean zeroButtonRun = true;
+boolean previousZeroButtonState = HIGH;
+boolean previousModeButtonState = HIGH;
+unsigned long currentTime = micros();
+unsigned long lastZeroPress = millis();
+
+const float cmToIn = 0.393701; //conversion from cm to in
+const int32_t usInMin = 60 * 1000000; //amount of microseconds in a min
+
+//measurment variables
+uint8_t fract;
+long newPosition;
+double displayPos;
+
+//units for length and flag for changing them
+String units;
+boolean unitSwitch;
+
+// ================================================================
 // ===                   TACHOMETER SETUP                       ===
 // ================================================================
 
@@ -125,10 +133,10 @@ boolean tactReadingStarted = false; //if we're reading from rpm
 double rpm, linSpeed;
 unsigned long tacStartTime = 0; //start time of tachometer reading
 boolean tachStartTimeSet = false;  //starting time is only set once the tach detects motion, flag for it that has happened
-const unsigned long measureIntervalMaxSec = 10; //maxium measurement period in seconds
+const uint8_t measureIntervalMaxSec = 10; //maxium measurement period in seconds
 const unsigned long measureIntervalMax = measureIntervalMaxSec * 1000000; //maxium measurement period in us //10 sec
 const String measureIntervalMaxString = String(measureIntervalMaxSec); //maxium measurement period as a string in sec
-
+unsigned long elapsedTime;
 
 // ================================================================
 // ================================================================
@@ -140,14 +148,14 @@ const String measureIntervalMaxString = String(measureIntervalMaxSec); //maxium 
 
 void setup() {
   //Serial.begin(115200);
-  
+
   // ================================================================
   // ===                    UNITS CONFIG                          ===
   // ================================================================
-  if(DEFAULT_UNITS_INCHES){
+  if (DEFAULT_UNITS_INCHES) {
     units = "in";
     unitSwitch = true;
-  } else{
+  } else {
     units = "cm";
     unitSwitch = false;
   }
@@ -188,7 +196,7 @@ void setup() {
   centerString("Wheel", 35, 2);
   centerString("gitub:AlbertGBarber", 55, 1);
   display.display();
-  delay(3000);
+  delay(2500);
 }
 
 // ================================================================
@@ -219,6 +227,11 @@ void loop() {
   //we always show a positive distance (although the reading can increment and decerement)
   while (mode == MEASURING_WHEEL) {
     runMeasuringWheel();
+  }
+
+  //Measures the diameter of a pipe but reading the circumference 
+  while (mode == DIAM_MEASURE) {
+    runDiaWheel();
   }
 
   //a tachometer to measure rpm and linear speed
@@ -254,7 +267,7 @@ void readButtons(void) {
     previousModeButtonState = LOW; //set the previous state to low while the button is being held
     //if the mode pin is high, we need change units if in measuring wheel mode
     //or switch out of tachometer mode if we're in it
-    if (mode == MEASURING_WHEEL) {
+    if (mode == MEASURING_WHEEL || mode == DIAM_MEASURE) {
       unitSwitch = !unitSwitch;
     } else {
       resetSystemState();
@@ -291,27 +304,17 @@ void runMeasuringWheel() {
   display.clearDisplay();
   drawHeader("Measuring Wheel");
 
-  long newPosition = myEnc.read();
+  newPosition = myEnc.read();
   //we always show a positive distance
   //the user can zero it if needed
   //the position calculated by multiplying the steps by the linear distance covered by one encoder step
-  double displayPos = abs(newPosition) * ENC_STEP_LENGTH;
+  displayPos = abs(newPosition) * ENC_STEP_LENGTH;
   //zeros the encoder count
   if (!zeroButtonRun) {
     myEnc.write(0);
     zeroButtonRun = true;
   }
-  display.setTextSize(3);
-  if (unitSwitch) {
-    displayPos = displayPos * cmToIn;  //convert from cm to in
-    units = "in";
-  } else {
-    units = "cm";
-  }
-  //write out current reading and units
-  centerString( doubleToString((double)displayPos, 2), 16, 3);
-  display.setCursor(48, 35);
-  display.print(units);
+  drawMeasurment();
   display.setCursor(0, 57);
   display.setTextSize(1);
   display.print("Wheel Radius: ");
@@ -321,6 +324,31 @@ void runMeasuringWheel() {
     display.print(WHEEL_DIAM / 2);
   }
   display.print(units);
+  display.display();
+  readButtons();
+}
+
+//displays the distance covered by the wheel and encoder (ie a ruler)
+//we always show a positive distance (although the reading can increment and decerement)
+void runDiaWheel() {
+  yield();
+  display.clearDisplay();
+  drawHeader("Pipe Dia. Mode");
+
+  newPosition = myEnc.read();
+  //we always show a positive distance
+  //the user can zero it if needed
+  //the position calculated by multiplying the steps by the linear distance covered by one encoder step
+  displayPos = abs(newPosition) * ENC_STEP_LENGTH / M_PI;
+  //zeros the encoder count
+  if (!zeroButtonRun) {
+    myEnc.write(0);
+    zeroButtonRun = true;
+  }
+  drawMeasurment();
+  display.setCursor(0, 57);
+  display.setTextSize(1);
+  display.print("Roll around pipe once");
   display.display();
   readButtons();
 }
@@ -345,7 +373,7 @@ void runTachometer() {
     display.setCursor(15, 20);
     display.print("Hit Zero to start");
     display.display();
-    if(DEFAULT_UNITS_INCHES){
+    if (DEFAULT_UNITS_INCHES) {
       units = "in";
     } else {
       units = "cm";
@@ -386,7 +414,7 @@ void runTachometer() {
         tacStartTime = micros();
       }
     } else {
-      unsigned long currentTime = micros();
+      currentTime = micros();
       if ( (currentTime - tacStartTime) > measureIntervalMax) {
         zeroButtonToggle = false;
       }
@@ -396,11 +424,11 @@ void runTachometer() {
   //if we were reading, but the zero button has been pressed, it's time to stop and caculate rpm
   if (!zeroButtonToggle && tactReadingStarted) {
     tactReadingStarted = false;
-    unsigned long currentTime = micros();
+    currentTime = micros();
     //get the total elapsed time for the measurment
-    unsigned long elapsedTime = currentTime - tacStartTime;
+    elapsedTime = currentTime - tacStartTime;
     //get the encoder's new position
-    long newPosition = myEnc.read();
+    newPosition = myEnc.read();
     //convert total revs to rpm
     rpm = ( ( abs(newPosition) / ENC_STEPS_PER_REV ) / (double)elapsedTime) * usInMin;
     //convert RPM to linear speed
@@ -417,7 +445,7 @@ void runTachometer() {
     display.print(doubleToString( (double)rpm, 0 ));
     display.setCursor(0, 28);
     display.print("Linear Spd:");
-    if(DEFAULT_UNITS_INCHES){
+    if (DEFAULT_UNITS_INCHES) {
       linSpeed = linSpeed * cmToIn;
     }
     display.print(doubleToString( (double)linSpeed, 1 ));
@@ -448,6 +476,31 @@ uint8_t getBatteryLevel(uint16_t voltage, uint16_t minVoltage, uint16_t maxVolta
   // normal
   uint8_t result = 105 - (105 / (1 + pow(1.724 * (voltage - minVoltage) / (maxVoltage - minVoltage), 5.5)));
   return result >= 100 ? 100 : result;
+}
+
+//displays the current encoder reading in either cm or in
+void drawMeasurment() {
+  display.setTextSize(3);
+  if (unitSwitch) {
+    displayPos = displayPos * cmToIn;  //convert from cm to in
+    //work out the decimal portion in the nearest 1/16's of an inch
+    fract = round(( displayPos - floor(displayPos) ) * INCH_FRACT);
+    units = "in";
+  } else {
+    units = "cm";
+  }
+  //write out current reading and units
+  centerString( doubleToString((double)displayPos, 2), 16, 3);
+  display.setCursor(48, 35);
+  display.print(units);
+  if(unitSwitch) {
+    //display the closest 1/16th decimal value
+    display.setCursor(90, 45);
+    display.setTextSize(1);
+    display.print(fract);
+    display.print("/");
+    display.print(INCH_FRACT);
+  }
 }
 
 //fills in the header on the screen (the yellow bar) with the current mode name and the battery charge level
