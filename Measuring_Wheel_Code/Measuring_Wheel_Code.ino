@@ -28,14 +28,13 @@
 //=================================================================
 // ===                   IMPORTANT VARS                         ===
 //=================================================================
-
 #define DISPLAY_ADDR         0x3C //I2C address for the SSD1306 display
 
 #define WHEEL_DIAM           8.95 //Measuring wheel diameter in cm
 
 #define DEFAULT_UNITS_INCHES false //sets default units to either cm or inches
 
-#define INCH_FRACT 16 //sets the fraction of an inch that the extra inch display will be rounded to
+#define INCH_FRACT           16 //sets the fraction of an inch that the extra inch display will be rounded to
 
 // ================================================================
 // ===                         MODES                            ===
@@ -51,11 +50,12 @@
 uint8_t NUM_MODES =      3; //total number of active modes
 
 volatile uint8_t mode =  0; //inital mode
+
 // ================================================================
 // ===                         PIN SETUP                        ===
 // ================================================================
-
-//Arduino Pro-Mini Pins
+//Arduino Pro-Mini Pins for encoder and pushbuttons
+//encoder must use at least one interrupt pin
 #define ENCODER_PIN_1     2
 #define ENCODER_PIN_2     3
 
@@ -76,7 +76,6 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 // ================================================================
 // ===             ENCODER / GEAR RATIO SETUP                   ===
 // ================================================================
-
 //both work as interrupts so we should get good performance
 Encoder myEnc(ENCODER_PIN_1, ENCODER_PIN_2);
 
@@ -127,7 +126,6 @@ boolean unitSwitch;
 // ================================================================
 // ===                   TACHOMETER SETUP                       ===
 // ================================================================
-
 boolean tachOn = false; //if a tachometer mode is active
 boolean tactReadingStarted = false; //if we're reading from rpm
 double rpm, linSpeed;
