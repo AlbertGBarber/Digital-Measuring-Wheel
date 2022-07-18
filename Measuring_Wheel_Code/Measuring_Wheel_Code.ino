@@ -45,9 +45,10 @@
 //and also change the order of the remaining modes (going from 0 to however remain)
 #define MEASURING_WHEEL  0
 #define DIAM_MEASURE     1
-#define TACHOMETER       2
+#define MEASURING_INSIDE 2
+#define TACHOMETER       3
 
-uint8_t NUM_MODES =      3; //total number of active modes
+uint8_t NUM_MODES =      4; //total number of active modes
 
 volatile uint8_t mode =  0; //inital mode
 
@@ -221,13 +222,21 @@ void setup() {
 //Both flags are reset to defaults (true for "run" and false for "toggle") when a mode changes
 void loop() {
 
-  //displays the distance covered by the wheel and encoder (ie a ruler)
+  //Displays the distance covered by the wheel and encoder (ie a ruler)
   //we always show a positive distance (although the reading can increment and decerement)
   while (mode == MEASURING_WHEEL) {
     runMeasuringWheel();
   }
 
-  //Measures the diameter of a pipe but reading the circumference 
+  //Displays the distance covered by the wheel + the wheel diameter
+  //Used for measuring inside corners (ex: The inside dimensions of a box)
+  //we always show a positive distance (although the reading can increment and decerement)
+  //The wheel's reading starts at the wheel diameter
+  while (mode == MEASURING_INSIDE) {
+    runMeasuringWheelInside();
+  }
+
+  //Measures the diameter of a pipe but reading the circumference
   while (mode == DIAM_MEASURE) {
     runDiaWheel();
   }
@@ -265,7 +274,7 @@ void readButtons(void) {
     previousModeButtonState = LOW; //set the previous state to low while the button is being held
     //if the mode pin is high, we need change units if in measuring wheel mode
     //or switch out of tachometer mode if we're in it
-    if (mode == MEASURING_WHEEL || mode == DIAM_MEASURE) {
+    if (mode != TACHOMETER) {
       unitSwitch = !unitSwitch;
     } else {
       resetSystemState();
@@ -295,7 +304,7 @@ void readButtons(void) {
   }
 }
 
-//displays the distance covered by the wheel and encoder (ie a ruler)
+//Displays the distance covered by the wheel and encoder (ie a ruler)
 //we always show a positive distance (although the reading can increment and decerement)
 void runMeasuringWheel() {
   yield();
@@ -322,6 +331,43 @@ void runMeasuringWheel() {
     display.print(WHEEL_DIAM / 2);
   }
   display.print(units);
+  display.display();
+  readButtons();
+}
+
+//Displays the distance covered by the wheel + the wheel diameter
+//Used for measuring inside corners (ex: The inside dimensions of a box)
+//we always show a positive distance (although the reading can increment and decerement)
+//The wheel's reading starts at the wheel diameter
+void runMeasuringWheelInside() {
+  yield();
+  display.clearDisplay();
+  drawHeader("Inside Corners");
+
+  newPosition = myEnc.read();
+  //we always show a positive distance
+  //the user can zero it if needed
+  //the position calculated by multiplying the steps by the linear distance covered by one encoder step
+  displayPos = abs(newPosition) * ENC_STEP_LENGTH;
+  //zeros the encoder count
+  if (!zeroButtonRun) {
+    myEnc.write(0);
+    zeroButtonRun = true;
+  }
+
+  //Increase the position by the wheel's diameter for the inside corners
+  displayPos = displayPos + WHEEL_DIAM;
+
+  drawMeasurment();
+  display.setCursor(0, 57);
+  display.setTextSize(1);
+  display.print(" (Dist + Wheel Diam)");
+  //if (unitSwitch) {
+    //display.print(WHEEL_DIAM_IN);
+  //} else {
+    //display.print(WHEEL_DIAM);
+  //}
+  //display.print(units);
   display.display();
   readButtons();
 }
@@ -491,7 +537,7 @@ void drawMeasurment() {
   centerString( doubleToString((double)displayPos, 2), 16, 3);
   display.setCursor(48, 35);
   display.print(units);
-  if(unitSwitch) {
+  if (unitSwitch) {
     //display the closest 1/16th decimal value
     display.setCursor(90, 45);
     display.setTextSize(1);
